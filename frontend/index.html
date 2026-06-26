@@ -329,7 +329,7 @@
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
 // IMPORTANT: Replace this with your actual Render URL after deploying
-const API = localStorage.getItem('niai_api_url') || 'https://niai-lms-api.onrender.com';
+const API = localStorage.getItem('niai_api_url') || 'https://niai-lms.onrender.com';
 
 const SUBJ_COLORS = {
   'Mathematics': '#1a5c1a', 'English': '#185fa5', 'Filipino': '#8b1a1a',
@@ -505,7 +505,7 @@ function bgClose(e, id) { if (e.target === document.getElementById(id)) closeMod
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
 function promptApiUrl() {
-  const url = prompt('Enter your Render API URL (e.g. https://niai-lms-api.onrender.com):');
+  const url = prompt('Enter your Render API URL (e.g. https://niai-lms.onrender.com):');
   if (url) { localStorage.setItem('niai_api_url', url.trim()); location.reload(); }
 }
 
