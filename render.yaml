@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: niai-lms-api
+    env: node
+    region: singapore   # closest to PH
+    plan: free
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /
