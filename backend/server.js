@@ -5,12 +5,10 @@ const cheerio = require('cheerio');
 const NodeCache = require('node-cache');
 
 const app = express();
-const cache = new NodeCache({ stdTTL: 3600 }); // cache 1 hour
+const cache = new NodeCache({ stdTTL: 3600 });
 
 app.use(cors());
 app.use(express.json());
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
 
 const HEADERS = {
   'User-Agent':
@@ -19,176 +17,199 @@ const HEADERS = {
   'Accept-Language': 'en-US,en;q=0.9',
 };
 
-async function fetchHTML(url) {
-  const res = await axios.get(url, { headers: HEADERS, timeout: 15000 });
+const SUBJECT_MAP = {
+  'mathematics': 'Mathematics', 'math': 'Mathematics',
+  'science': 'Science',
+  'english': 'English',
+  'filipino': 'Filipino', 'wikang': 'Filipino',
+  'araling panlipunan': 'Araling Panlipunan', 'ap ': 'Araling Panlipunan',
+  'edukasyon sa pagpapakatao': 'EsP', 'esp': 'EsP',
+  'epp': 'EPP/TLE', 'tle': 'EPP/TLE', 'hele': 'EPP/TLE',
+  'computer': 'Computer Studies', 'ict': 'Computer Studies',
+  'mapeh': 'MAPEH', 'music': 'MAPEH', 'arts': 'MAPEH', ' pe ': 'MAPEH', 'health': 'MAPEH',
+};
+
+function inferSubject(text) {
+  const lower = ` ${text.toLowerCase()} `;
+  for (const [kw, subj] of Object.entries(SUBJECT_MAP)) {
+    if (lower.includes(kw)) return subj;
+  }
+  return 'General';
+}
+
+function inferGrade(text) {
+  const m = text.match(/grade\s*(\d+)/i);
+  if (m) return `Grade ${m[1]}`;
+  if (/kinder/i.test(text)) return 'Kinder';
+  return 'Various';
+}
+
+async function fetchHTML(url, timeout = 20000) {
+  const res = await axios.get(url, { headers: HEADERS, timeout });
   return cheerio.load(res.data);
 }
 
-// ─── Scrapers ────────────────────────────────────────────────────────────────
-
-/**
- * Scrape learningpal.net/deped-matatag-textbooks/
- * Returns array of { title, grade, subject, url, source }
- */
+// ─── LearningPal: scrape multiple MATATAG pages ───────────────────────────────
 async function scrapeLearningPal() {
   const ckey = 'learningpal';
   if (cache.has(ckey)) return cache.get(ckey);
 
-  const $ = await fetchHTML('https://learningpal.net/deped-matatag-textbooks/');
+  const urls = [
+    'https://learningpal.net/deped-matatag-textbooks/',
+    'https://learningpal.net/?s=matatag+module',
+    'https://learningpal.net/?s=matatag+self+learning',
+  ];
+
+  const seen = new Set();
   const books = [];
 
-  // learningpal lists download links in anchor tags with post headings
-  $('h2, h3, h4').each((_, el) => {
-    const heading = $(el).text().trim();
-    if (!heading || heading.length < 5) return;
+  for (const url of urls) {
+    try {
+      const $ = await fetchHTML(url);
 
-    // find closest download link sibling/child
-    const link =
-      $(el).next('a').attr('href') ||
-      $(el).find('a').attr('href') ||
-      $(el).nextAll('a').first().attr('href') ||
-      null;
+      // Grab articles / post listings
+      $('article, .post, h2.entry-title, h3.entry-title, .elementor-post').each((_, el) => {
+        const titleEl = $(el).is('article, .post, .elementor-post')
+          ? $(el).find('h2, h3, .entry-title, .elementor-post__title').first()
+          : $(el);
+        const title = titleEl.text().trim();
+        if (!title || title.length < 6) return;
 
-    // try to infer grade from heading
-    const gradeMatch = heading.match(/Grade\s*(\d+)/i);
-    const grade = gradeMatch ? `Grade ${gradeMatch[1]}` : 'All levels';
+        const link =
+          titleEl.find('a').attr('href') ||
+          $(el).find('a').first().attr('href') ||
+          '';
 
-    // infer subject
-    const subjectMap = {
-      Math: 'Mathematics', Science: 'Science', English: 'English',
-      Filipino: 'Filipino', Araling: 'Araling Panlipunan',
-      'Edukasyon sa Pagpapakatao': 'EsP', EPP: 'EPP/TLE', TLE: 'EPP/TLE',
-      HELE: 'EPP/TLE', AP: 'Araling Panlipunan', ICT: 'Computer Studies',
-      Computer: 'Computer Studies', MAPEH: 'MAPEH', Music: 'MAPEH',
-      Arts: 'MAPEH', PE: 'MAPEH', Health: 'MAPEH',
-    };
-    let subject = 'General';
-    for (const [kw, subj] of Object.entries(subjectMap)) {
-      if (heading.toLowerCase().includes(kw.toLowerCase())) {
-        subject = subj;
-        break;
-      }
-    }
+        if (!link || !link.startsWith('http') || seen.has(link)) return;
+        seen.add(link);
 
-    if (link && link.startsWith('http')) {
-      books.push({
-        id: `lp-${books.length + 1}`,
-        title: heading,
-        grade,
-        subject,
-        url: link,
-        source: 'LearningPal',
-        cover: '',
-      });
-    }
-  });
+        const cover = $(el).find('img').first().attr('src') || '';
 
-  // fallback: grab ALL external links that look like resources
-  if (books.length < 3) {
-    $('a[href]').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      const text = $(el).text().trim();
-      if (
-        text.length > 10 &&
-        (href.includes('drive.google') ||
-          href.includes('.pdf') ||
-          href.includes('deped') ||
-          href.includes('module'))
-      ) {
         books.push({
-          id: `lp-fb-${books.length + 1}`,
-          title: text,
-          grade: 'Various',
-          subject: 'General',
-          url: href,
+          id: `lp-${books.length + 1}`,
+          title,
+          grade: inferGrade(title),
+          subject: inferSubject(title),
+          url: link,
           source: 'LearningPal',
-          cover: '',
+          cover,
         });
-      }
-    });
+      });
+    } catch (e) {
+      console.warn(`LearningPal fetch failed for ${url}:`, e.message);
+    }
   }
 
   cache.set(ckey, books);
   return books;
 }
 
-/**
- * Scrape depedlibre.com/deped-modules/
- */
+// ─── DepEd Libre: scrape modules pages ───────────────────────────────────────
 async function scrapeDepedLibre() {
   const ckey = 'depedlibre';
   if (cache.has(ckey)) return cache.get(ckey);
 
-  const $ = await fetchHTML('https://depedlibre.com/deped-modules/');
+  const urls = [
+    'https://depedlibre.com/deped-modules/',
+    'https://depedlibre.com/?s=matatag',
+    'https://depedlibre.com/?s=self+learning+module',
+  ];
+
+  const seen = new Set();
   const books = [];
 
-  $('article, .entry, .post, .elementor-post').each((_, el) => {
-    const title = $(el).find('h2, h3, .entry-title, .elementor-post__title').first().text().trim();
-    const link = $(el).find('a').first().attr('href') || '';
-    const excerpt = $(el).find('p, .entry-summary').first().text().trim();
-    if (!title || !link) return;
+  for (const url of urls) {
+    try {
+      const $ = await fetchHTML(url);
 
-    const gradeMatch = (title + excerpt).match(/Grade\s*(\d+)/i);
-    const grade = gradeMatch ? `Grade ${gradeMatch[1]}` : 'Various';
+      $('article, .post, .elementor-post').each((_, el) => {
+        const title = $(el).find('h2, h3, .entry-title, .elementor-post__title').first().text().trim();
+        const link = $(el).find('a').first().attr('href') || '';
+        if (!title || !link || seen.has(link)) return;
+        seen.add(link);
 
-    const subjectMap = {
-      Math: 'Mathematics', Science: 'Science', English: 'English',
-      Filipino: 'Filipino', Araling: 'Araling Panlipunan', EPP: 'EPP/TLE',
-      HELE: 'EPP/TLE', Computer: 'Computer Studies', MAPEH: 'MAPEH',
-    };
-    let subject = 'General';
-    for (const [kw, subj] of Object.entries(subjectMap)) {
-      if (title.toLowerCase().includes(kw.toLowerCase())) { subject = subj; break; }
+        const cover = $(el).find('img').first().attr('src') || '';
+
+        books.push({
+          id: `dl-${books.length + 1}`,
+          title,
+          grade: inferGrade(title),
+          subject: inferSubject(title),
+          url: link,
+          source: 'DepEd Libre',
+          cover,
+        });
+      });
+    } catch (e) {
+      console.warn(`DepEd Libre fetch failed for ${url}:`, e.message);
     }
-
-    books.push({
-      id: `dl-${books.length + 1}`,
-      title,
-      grade,
-      subject,
-      url: link,
-      source: 'DepEd Libre',
-      cover: $(el).find('img').first().attr('src') || '',
-    });
-  });
+  }
 
   cache.set(ckey, books);
   return books;
 }
 
-/**
- * Scrape teachpinas.com MATATAG curriculum guides
- */
+// ─── Teach Pinas: curriculum guides + modules ────────────────────────────────
 async function scrapeTeachPinas() {
   const ckey = 'teachpinas';
   if (cache.has(ckey)) return cache.get(ckey);
 
-  const $ = await fetchHTML('https://www.teachpinas.com/matatag-curriculum-guide-pdf-all-subjects/');
+  const urls = [
+    'https://www.teachpinas.com/matatag-curriculum-guide-pdf-all-subjects/',
+    'https://www.teachpinas.com/?s=matatag+module',
+    'https://www.teachpinas.com/?s=self+learning+module',
+  ];
+
+  const seen = new Set();
   const books = [];
 
-  $('a[href]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const text = $(el).text().trim();
-    if (
-      text.length > 8 &&
-      (href.includes('.pdf') || href.includes('drive.google') || href.includes('docs.google'))
-    ) {
-      const gradeMatch = text.match(/Grade\s*(\d+)|Kinder/i);
-      const grade = gradeMatch
-        ? gradeMatch[0].includes('Kinder') ? 'Kinder' : `Grade ${gradeMatch[1]}`
-        : 'Various';
+  for (const url of urls) {
+    try {
+      const $ = await fetchHTML(url);
 
-      books.push({
-        id: `tp-${books.length + 1}`,
-        title: text,
-        grade,
-        subject: 'Curriculum Guide',
-        url: href,
-        source: 'Teach Pinas',
-        cover: '',
+      // Grab direct PDF/Drive links with meaningful text
+      $('a[href]').each((_, el) => {
+        const href = $(el).attr('href') || '';
+        const text = $(el).text().trim();
+        if (
+          text.length > 8 &&
+          !seen.has(href) &&
+          (href.includes('.pdf') || href.includes('drive.google') || href.includes('docs.google'))
+        ) {
+          seen.add(href);
+          books.push({
+            id: `tp-${books.length + 1}`,
+            title: text,
+            grade: inferGrade(text),
+            subject: inferSubject(text),
+            url: href,
+            source: 'Teach Pinas',
+            cover: '',
+          });
+        }
       });
+
+      // Also grab post listings
+      $('article, .post, .elementor-post').each((_, el) => {
+        const title = $(el).find('h2, h3, .entry-title').first().text().trim();
+        const link = $(el).find('a').first().attr('href') || '';
+        if (!title || !link || seen.has(link)) return;
+        seen.add(link);
+
+        books.push({
+          id: `tp-${books.length + 1}`,
+          title,
+          grade: inferGrade(title),
+          subject: inferSubject(title),
+          url: link,
+          source: 'Teach Pinas',
+          cover: $(el).find('img').first().attr('src') || '',
+        });
+      });
+    } catch (e) {
+      console.warn(`Teach Pinas fetch failed for ${url}:`, e.message);
     }
-  });
+  }
 
   cache.set(ckey, books);
   return books;
@@ -196,12 +217,10 @@ async function scrapeTeachPinas() {
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
-// Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', name: 'NIAI LMS Scraper API', version: '1.0.0' });
+  res.json({ status: 'ok', name: 'NIAI LMS Scraper API', version: '1.1.0' });
 });
 
-// GET /api/books — returns all scraped books, merged + deduplicated
 app.get('/api/books', async (req, res) => {
   try {
     const [lp, dl, tp] = await Promise.allSettled([
@@ -216,18 +235,17 @@ app.get('/api/books', async (req, res) => {
       ...(tp.status === 'fulfilled' ? tp.value : []),
     ];
 
-    // filter by query params
-    let results = all;
-    if (req.query.grade) {
-      results = results.filter(b =>
-        b.grade.toLowerCase().includes(req.query.grade.toLowerCase())
-      );
-    }
-    if (req.query.subject) {
-      results = results.filter(b =>
-        b.subject.toLowerCase().includes(req.query.subject.toLowerCase())
-      );
-    }
+    // Deduplicate by URL
+    const seenUrls = new Set();
+    const deduped = all.filter(b => {
+      if (!b.url || b.url === '#' || seenUrls.has(b.url)) return false;
+      seenUrls.add(b.url);
+      return true;
+    });
+
+    let results = deduped;
+    if (req.query.grade) results = results.filter(b => b.grade.toLowerCase().includes(req.query.grade.toLowerCase()));
+    if (req.query.subject) results = results.filter(b => b.subject.toLowerCase().includes(req.query.subject.toLowerCase()));
     if (req.query.q) {
       const q = req.query.q.toLowerCase();
       results = results.filter(b =>
@@ -244,35 +262,26 @@ app.get('/api/books', async (req, res) => {
   }
 });
 
-// GET /api/books/sources — which sources are available
 app.get('/api/books/sources', (req, res) => {
   res.json({
     sources: [
-      { id: 'learningpal', name: 'LearningPal', url: 'https://learningpal.net/deped-matatag-textbooks/' },
-      { id: 'depedlibre', name: 'DepEd Libre', url: 'https://depedlibre.com/deped-modules/' },
-      { id: 'teachpinas', name: 'Teach Pinas', url: 'https://www.teachpinas.com/matatag-curriculum-guide-pdf-all-subjects/' },
+      { id: 'learningpal', name: 'LearningPal', url: 'https://learningpal.net' },
+      { id: 'depedlibre', name: 'DepEd Libre', url: 'https://depedlibre.com' },
+      { id: 'teachpinas', name: 'Teach Pinas', url: 'https://www.teachpinas.com' },
     ],
   });
 });
 
-// POST /api/cache/clear — manually bust the cache (admin use)
 app.post('/api/cache/clear', (req, res) => {
   cache.flushAll();
   res.json({ message: 'Cache cleared' });
 });
 
-// GET /api/proxy?url=... — proxy a resource URL so PDFs can be embedded
-// (avoids CORS issues on the frontend)
 app.get('/api/proxy', async (req, res) => {
   const target = req.query.url;
   if (!target) return res.status(400).json({ error: 'Missing url param' });
-
   try {
-    const response = await axios.get(target, {
-      headers: HEADERS,
-      responseType: 'stream',
-      timeout: 20000,
-    });
+    const response = await axios.get(target, { headers: HEADERS, responseType: 'stream', timeout: 20000 });
     res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
     res.setHeader('Access-Control-Allow-Origin', '*');
     response.data.pipe(res);
